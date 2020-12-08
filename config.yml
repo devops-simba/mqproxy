@@ -1,7 +1,7 @@
 proxy:
   logging:
     verbosity: 10
-    level: debug
+    level: info
   metrics:
     address: http://:8080/metrics
     enabled: yes

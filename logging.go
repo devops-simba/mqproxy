@@ -59,7 +59,7 @@ func InitializeLogging(config *LoggingConfig) error {
 	case "2", "stderr":
 		output = os.Stderr
 	default:
-		if output, err = os.Create(config.Output); err != nil {
+		if output, err = os.OpenFile(config.Output, os.O_RDWR|os.O_APPEND, os.ModeAppend); err != nil {
 			return err
 		}
 		mustCloseOutput = true
