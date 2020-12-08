@@ -1,0 +1,28 @@
+proxy:
+  logging:
+    verbosity: 10
+    level: debug
+  metrics:
+    address: http://:8080/metrics
+    enabled: yes
+    # certificate: { cert: /path/to/metrics/certificate, key: /path/to/metrics/key/file }
+  services:
+    default:
+      enabled: yes    # this is default
+      proxyMode: raw  # this is default
+      frontends:
+        - address: mqtt
+          name: MQTT frontend
+        - address: wss
+          # by default name will be copied from the address
+          certificate: { cert: /path/to/certificate/file, key: /path/to/private/key/file }
+          requireClientValidation: true
+          caFiles: [ /path/to/ca/files/1, /path/to/ca/files/2 ]
+          enabled: no
+      backends:
+        - address: wss://rtc-staging-production-connect.apps.public.teh-1.snappcloud.io/mqtt
+          weight: 1     # this is default
+          enabled: yes  # this is also default
+        - address: wss://rtc-staging-production-connect.apps.public.teh-1.snappcloud.io/mqtt
+          weight: 0     # Only use this if there is no other backend that can handle the connection
+          enabled: yes  # this is also default

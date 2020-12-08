@@ -1,57 +1,136 @@
 package main
 
 import (
-	"crypto/tls"
 	"math/rand"
-	"net"
+	"sync/atomic"
+	"unsafe"
 )
 
-type MQTTBackend interface {
-	Connect(sourceConn net.Conn) (MQTTConnector, net.Conn, error)
+type MQTTBackend struct {
+	Name     string
+	Weight   int
+	Endpoint MQTTClientEndpoint
+
+	availabilityCounter unsafe.Pointer
 }
 
-type Backend struct {
-	Name        string
-	Connector   MQTTConnector
-	Weight      int32
-	Certificate *tls.Certificate
+func (this *MQTTBackend) IsAvailable() bool {
+	availabilityCounter := (*AvailabilityCounter)(atomic.LoadPointer(&this.availabilityCounter))
+	return availabilityCounter.IsAvailableToTry()
 }
-
-func (this *Backend) Connect(sourceConn net.Conn) (MQTTConnector, net.Conn, error) {
-	conn, err := this.Connector.Connect(this.Certificate)
-	return this.Connector, conn, err
-}
-
-type BackendGroup []*Backend
-
-func randomSelect(items BackendGroup) int {
-	weightSum := int32(0)
-	for _, item := range items {
-		weightSum += item.Weight
-	}
-
-	selection := rand.Int31n(weightSum)
-	for i, item := range items {
-		if selection < item.Weight {
-			return i
+func (this *MQTTBackend) OnConnectionSucceeded() {
+	for {
+		oldPointer := atomic.LoadPointer(&this.availabilityCounter)
+		availabilityCounter := (*AvailabilityCounter)(oldPointer)
+		newAvailabilityCounter := unsafe.Pointer(availabilityCounter.OnConnectionSucceeded())
+		if atomic.CompareAndSwapPointer(&this.availabilityCounter, oldPointer, newAvailabilityCounter) {
+			break
 		}
-		selection -= item.Weight
 	}
-
-	return -1
 }
-func (this BackendGroup) Connect(sourceConn net.Conn) (MQTTConnector, net.Conn, error) {
-	value := this
-	var lastErr error
-	for len(value) != 0 {
-		selection := randomSelect(value)
-		backend := value[selection]
-		connector, conn, err := backend.Connect(sourceConn)
-		if err == nil {
-			return connector, conn, err
+func (this *MQTTBackend) OnConnectionFailed() {
+	for {
+		oldPointer := atomic.LoadPointer(&this.availabilityCounter)
+		availabilityCounter := (*AvailabilityCounter)(oldPointer)
+		newAvailabilityCounter := unsafe.Pointer(availabilityCounter.OnConnectionFailed())
+		if atomic.CompareAndSwapPointer(&this.availabilityCounter, oldPointer, newAvailabilityCounter) {
+			break
 		}
-		lastErr = err
+	}
+}
+
+type MQTTBackendList []*MQTTBackend
+
+func (this MQTTBackendList) Contains(backend *MQTTBackend) bool {
+	for i := 0; i < len(this); i++ {
+		if this[i] == backend {
+			return true
+		}
+	}
+	return false
+}
+func (this MQTTBackendList) Append(backend *MQTTBackend) MQTTBackendList {
+	return append(this, backend)
+}
+func (this MQTTBackendList) RandomSelect(active bool) *MQTTBackend {
+	if len(this) == 0 {
+		return nil
+	}
+	if len(this) == 1 {
+		return this[0]
 	}
 
-	return nil, nil, lastErr
+	weightSum := 0
+	if active {
+		for i := 0; i < len(this); i++ {
+			weightSum += this[i].Weight
+		}
+
+		selection := rand.Intn(weightSum)
+		for i := 0; i < len(this); i++ {
+			if selection < this[i].Weight {
+				return this[i]
+			}
+			selection -= this[i].Weight
+		}
+	} else {
+		for i := 0; i < len(this); i++ {
+			weightSum += 1 - this[i].Weight
+		}
+
+		selection := rand.Intn(weightSum)
+		for i := 0; i < len(this); i++ {
+			weight := 1 - this[i].Weight
+			if selection < weight {
+				return this[i]
+			}
+			selection -= weight
+		}
+	}
+
+	panic("Must never reach here")
+}
+func (this MQTTBackendList) Filter(predicate func(*MQTTBackend) bool) MQTTBackendList {
+	if len(this) == 0 {
+		return this // nothing to filter
+	}
+
+	n := 0
+	result := make(MQTTBackendList, len(this))
+	for i := 0; i < len(this); i++ {
+		if predicate(this[i]) {
+			result[n] = this[i]
+			n += 1
+		}
+	}
+	return result[:n]
+}
+
+type MQTTBackendConfig struct {
+	MQTTClientEndpointConfig `yaml:",inline"`
+	Name                     string `yaml:"name"`
+	Weight                   *int   `yaml:"weight"`
+	Enabled                  *bool  `yaml:"enabled,omitempty"`
+}
+
+func CreateBackend(config MQTTBackendConfig) (*MQTTBackend, bool, error) {
+	client, err := CreateClientEndpoint(config.MQTTClientEndpointConfig)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if config.Name == "" {
+		config.Name = "backend_" + client.GetAddress()
+	}
+
+	backend := &MQTTBackend{
+		Name:                config.Name,
+		Endpoint:            client,
+		Weight:              1,
+		availabilityCounter: unsafe.Pointer(NewAvailabilityCounter()),
+	}
+	if config.Weight != nil {
+		backend.Weight = *config.Weight
+	}
+	return backend, GetOptionalBool(config.Enabled, true), nil
 }

@@ -2,79 +2,91 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"os"
-	"sync"
 
-	log "github.com/golang/glog"
+	"github.com/devops-simba/helpers"
+	"gopkg.in/yaml.v2"
 )
 
-func Readenv(key string, defaultValue string) string {
-	value, ok := os.LookupEnv(key)
-	if ok {
-		return value
-	} else {
-		return defaultValue
-	}
+type Config struct {
+	Logging  *LoggingConfig `yaml:"logging,omitempty"`
+	Metrics  *MetricsConfig `yaml:"metrics,omitempty"`
+	Services map[string]MQTTServiceConfig
 }
-func Initialize() []*MQTTFrontend {
-	configPath := flag.String("config", Readenv("CONFIG_PATH", "/etc/mqproxy/conf.yml"), "Path to the config file")
-	flag.Parse()
 
-	configData, err := ioutil.ReadFile(*configPath)
+func loadConfig(path string) (*Config, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		log.Fatalf("Failed to load config from the file: %v", err)
+		return nil, fmt.Errorf("Failed to open config file: %w", err)
+	}
+	defer file.Close()
+
+	configContent, err := ioutil.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to read config file's content: %w", err)
 	}
 
-	servers, err := LoadConfig(configData)
+	var config map[string]*Config
+	err = yaml.Unmarshal(configContent, &config)
 	if err != nil {
-		log.Fatalf("Invalid config format: %v", err)
+		return nil, fmt.Errorf("Invalid config file: %w", err)
 	}
 
-	return servers
+	if len(config) != 1 || config["proxy"] == nil {
+		return nil, helpers.StringError("Config file format is not valid. Root of the config file must be `proxy`")
+	}
+
+	return config["proxy"], nil
 }
 
 func main() {
-	servers := Initialize()
-	stop := make(chan struct{})
-	stopped := make([]<-chan struct{}, 0)
-	//
-	for i := 0; i < len(servers); i++ {
-		ch, err := servers[i].Run(stop)
+	var configFilePath string
+	flag.StringVar(&configFilePath, "config", "./config.yml", "Path to the config file")
+	flag.Parse()
+
+	config, err := loadConfig(configFilePath)
+	if err != nil {
+		panic(err)
+	}
+
+	err = InitializeLogging(config.Logging)
+	if err != nil {
+		panic(err)
+	}
+	defer StopLogging()
+
+	helpers.SetGlobalServiceExecuter(helpers.CreateServiceExecuter(GetLogFactory()))
+
+	err = InitializeMetrics(config.Metrics)
+	if err != nil {
+		GetMainLogger().Fatalf("Failed to initialize metrics: %v", helpers.CContent(helpers.Orange, err))
+	}
+	defer StopMetrics()
+
+	services := make([]helpers.Service, 0, len(config.Services))
+	for svcName, svcConfig := range config.Services {
+		service, enabled, err := CreateService(svcName, svcConfig)
 		if err != nil {
-			// stop all previous servers
-			close(stop)
-			for _, c := range stopped {
-				<-c
-			}
-			log.Fatalf("Failed to load server: %v", err)
+			GetMainLogger().Fatalf("Failed to load service(%v): %v",
+				helpers.CContent(helpers.Green, svcName),
+				helpers.CContent(helpers.Orange, err))
+		}
+		if !enabled {
+			GetMainLogger().Verbosef(1, "Ignoring service(%v) as it is not enabled",
+				helpers.CContent(helpers.Green, svcName))
 		}
 
-		stopped = append(stopped, ch)
+		services = append(services, service)
 	}
 
-	// now that all servers are running, we must wait for end signal
-	allDone := sync.WaitGroup{}
-	for i := 0; i < len(servers); i++ {
-		allDone.Add(1)
-		go func(index int) {
-			<-stopped[index]
-			allDone.Done()
-			log.Infof("frontend `%s` stopped", servers[index].Connector.GetAddress())
-		}(i)
-	}
+	stopRequested := make(chan struct{})
+	svc := helpers.MergeServices("Application Services", services...)
+	stopped := helpers.ExecuteServiceAsync(svc, stopRequested)
 
-	allFrontendsStopped := make(chan struct{})
-	go func() {
-		allDone.Wait()
-		close(allFrontendsStopped)
-	}()
-
-	stopSignal := SetupSignalHandler(1)
-	select {
-	case <-allFrontendsStopped:
-	case <-stopSignal:
-		close(stop)
-		<-allFrontendsStopped
-	}
+	helpers.WaitForApplicationTermination(func() {
+		GetMainLogger().Debug("Close signal received")
+		close(stopRequested)
+	}, stopped)
 }
