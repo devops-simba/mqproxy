@@ -19,6 +19,7 @@ func (this *MQTTBackend) IsAvailable() bool {
 	return availabilityCounter.IsAvailableToTry()
 }
 func (this *MQTTBackend) OnConnectionSucceeded() {
+	OnBackendConnectionSucceded(this.Name)
 	for {
 		oldPointer := atomic.LoadPointer(&this.availabilityCounter)
 		availabilityCounter := (*AvailabilityCounter)(oldPointer)
@@ -29,6 +30,7 @@ func (this *MQTTBackend) OnConnectionSucceeded() {
 	}
 }
 func (this *MQTTBackend) OnConnectionFailed() {
+	OnBackendConnectionFailed(this.Name)
 	for {
 		oldPointer := atomic.LoadPointer(&this.availabilityCounter)
 		availabilityCounter := (*AvailabilityCounter)(oldPointer)

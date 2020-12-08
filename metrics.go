@@ -20,9 +20,11 @@ const (
 	lbProtocol       = "protocol"
 	lbNewBackend     = "new_backend_name"
 
-	numConnectedClients   = "mqproxy_connected_clients"
-	numRequests           = "mqproxy_proxy_requests_total"
-	histogramResponseTime = "mqproxy_response_duration_seconds"
+	numConnectedClients         = "mqproxy_connected_clients"
+	numRequests                 = "mqproxy_proxy_requests_total"
+	histogramResponseTime       = "mqproxy_response_duration_seconds"
+	succeededBackendConnections = "mqproxy_succeeded_backend_connections_total"
+	failedBackendConnections    = "mqproxy_failed_backend_connections_total"
 )
 
 var (
@@ -49,6 +51,22 @@ var (
 			Name: histogramResponseTime,
 			Help: "Duration to answer a response",
 		}, []string{lbService, lbFrontend, lbBackend},
+	)
+
+	// Labels: backend
+	metricSucceededBackendConnections = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: succeededBackendConnections,
+			Help: "Number of succeeded connections that handled by a backend",
+		}, []string{lbBackend},
+	)
+
+	// Labels: backend
+	metricFailedBackendConnections = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: failedBackendConnections,
+			Help: "number of time that a backend failed to accept a connection",
+		}, []string{lbBackend},
 	)
 
 	metricsServer *http.Server   = nil
@@ -88,6 +106,18 @@ func InitializeMetrics(config *MetricsConfig) error {
 	err = prometheus.Register(metricHistogramResponseTime)
 	if err != nil {
 		metricsLogger.Errorf("Failed to register metric `%s`: %v", histogramResponseTime, err)
+		return err
+	}
+
+	err = prometheus.Register(metricSucceededBackendConnections)
+	if err != nil {
+		metricsLogger.Errorf("Failed to register metric `%s`: %v", succeededBackendConnections, err)
+		return err
+	}
+
+	err = prometheus.Register(metricFailedBackendConnections)
+	if err != nil {
+		metricsLogger.Errorf("Failed to register metric `%s`: %v", failedBackendConnections, err)
 		return err
 	}
 
@@ -182,4 +212,21 @@ func OnResponse(serviceName, frontend, backend string, duration time.Duration) {
 	//metricsLogger.Debugf("Response{service: `%s`, frontend: `%s`, backend: `%s`, duration: `%v`}", serviceName, frontend, backend, duration)
 	o := metricHistogramResponseTime.WithLabelValues(serviceName, frontend, backend)
 	o.Observe(duration.Seconds())
+}
+
+func OnBackendConnectionSucceded(backend string) {
+	if metricsServer == nil {
+		return
+	}
+
+	c := metricSucceededBackendConnections.WithLabelValues(backend)
+	c.Inc()
+}
+func OnBackendConnectionFailed(backend string) {
+	if metricsServer == nil {
+		return
+	}
+
+	c := metricFailedBackendConnections.WithLabelValues(backend)
+	c.Inc()
 }
