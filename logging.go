@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/devops-simba/helpers"
 )
@@ -59,7 +60,11 @@ func InitializeLogging(config *LoggingConfig) error {
 	case "2", "stderr":
 		output = os.Stderr
 	default:
-		if output, err = os.OpenFile(config.Output, os.O_RDWR|os.O_APPEND, os.ModeAppend); err != nil {
+		dirName := filepath.Dir(config.Output)
+		if _, err := os.Stat(dirName); err != nil && os.IsNotExist(err) {
+			os.MkdirAll(dirName, 0777)
+		}
+		if output, err = os.OpenFile(config.Output, os.O_RDWR|os.O_APPEND|os.O_CREATE, os.ModeAppend); err != nil {
 			return err
 		}
 		mustCloseOutput = true
